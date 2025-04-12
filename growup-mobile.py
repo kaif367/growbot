@@ -10,7 +10,6 @@ import telebot
 from telebot.apihelper import ApiTelegramException
 import sys
 import base64  # For basic encryption of stored passwords
-import msvcrt  # For keyboard input detection
 import codecs
 sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
 
