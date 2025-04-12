@@ -5,56 +5,17 @@ import requests
 import re
 import time
 from datetime import datetime, timedelta
+from colorama import init, Fore, Style
+import telebot
+from telebot.apihelper import ApiTelegramException
 import sys
 import base64  # For basic encryption of stored passwords
+import msvcrt  # For keyboard input detection
 import codecs
-from colorama import init, Fore, Style
+sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
 
-def hit_enter_to_continue():
-    """Pause execution until user hits enter"""
-    input(Fore.YELLOW + "\nPress Enter to continue..." + Style.RESET_ALL)
-
-# Check if running on Termux
-IS_TERMUX = os.path.exists('/data/data/com.termux/files/usr/bin/termux-setup-storage')
-
-# Handle UTF-8 encoding for Termux
-if IS_TERMUX:
-    sys.stdout.reconfigure(encoding='utf-8')
-
-# Initialize color handling
-if not IS_TERMUX:
-    init()
-else:
-    # Create dummy color classes for Termux
-    class DummyColor:
-        def __getattr__(self, name):
-            return ''
-    Fore = DummyColor()
-    Style = DummyColor()
-
-# Handle encoding for Termux
-if IS_TERMUX:
-    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
-
-# Import telebot only if not on Termux
-if not IS_TERMUX:
-    import telebot
-    from telebot.apihelper import ApiTelegramException
-else:
-    # Create dummy telebot for Termux
-    class DummyTelebot:
-        def __init__(self, token):
-            pass
-        
-        def send_message(self, chat_id, text, parse_mode=None):
-            print(f"Telegram message would be sent to {chat_id}: {text}")
-            return True
-    
-    telebot = type('', (), {'TeleBot': DummyTelebot})()
-    ApiTelegramException = Exception
-
-# Remove msvcrt dependency (Windows-specific)
-# import msvcrt  # For keyboard input detection
+# Initialize colorama
+init(autoreset=True)
 
 def get_application_path():
     """Get the path where the application is running from (works in both script and exe)"""
@@ -80,57 +41,79 @@ def get_application_path():
 
 # Constants and paths
 APP_PATH = get_application_path()
+DATA_DIR = os.path.join(APP_PATH, "data")
 
-# Data directory setup
-def setup_data_directory():
-    if IS_TERMUX:
-        # Use Termux home directory
-        base_dir = os.path.expanduser('~')
-    else:
-        # Use standard application directory
-        base_dir = os.path.dirname(os.path.abspath(__file__))
+# Create data directory if it doesn't exist
+try:
+    if not os.path.exists(DATA_DIR):
+        os.makedirs(DATA_DIR, exist_ok=True)
     
-    data_dir = os.path.join(base_dir, 'GrowupSignalsData')
-    
-    # Create data directory if it doesn't exist
+    # Test write access to the DATA_DIR
+    test_file = os.path.join(DATA_DIR, "test_write.tmp")
+    with open(test_file, 'w') as f:
+        f.write("test")
+    os.remove(test_file)
+except Exception as e:
+    print(Fore.RED + f"Error accessing data directory: {str(e)}" + Style.RESET_ALL)
+    print(Fore.YELLOW + "Application may have limited functionality due to permission issues." + Style.RESET_ALL)
+    # Try to use a user-specific location as fallback
     try:
-        os.makedirs(data_dir, exist_ok=True)
-        
-        # Test write access
-        test_file = os.path.join(data_dir, '.test')
-        with open(test_file, 'w') as f:
-            f.write('test')
-        os.remove(test_file)
-        
-        return data_dir
-    except (OSError, IOError) as e:
-        print(f"Error setting up data directory: {e}")
-        # Fallback to current directory
-        return os.getcwd()
+        user_home = os.path.expanduser("~")
+        DATA_DIR = os.path.join(user_home, "GrowupSignalsData")
+        os.makedirs(DATA_DIR, exist_ok=True)
+        print(Fore.GREEN + f"Using alternative data directory: {DATA_DIR}" + Style.RESET_ALL)
+    except:
+        # Last resort fallback to current directory
+        DATA_DIR = os.path.join(os.getcwd(), "data")
+        os.makedirs(DATA_DIR, exist_ok=True)
 
-# Set up data paths
-DATA_DIR = setup_data_directory()
-CREDENTIALS_FILE = os.path.join(DATA_DIR, 'credentials.json')
-DEFAULT_SETTINGS_FILE = os.path.join(DATA_DIR, 'default_settings.json')
-AUTO_BOT_SETTINGS_FILE = os.path.join(DATA_DIR, 'auto_bot_settings.json')
+# Paths for settings and credentials
+CREDENTIALS_FILE = os.path.join(DATA_DIR, "saved_credentials.json")
+DEFAULT_SETTINGS_FILE = os.path.join(DATA_DIR, "default_settings.json")
+AUTO_BOT_SETTINGS_FILE = os.path.join(DATA_DIR, "auto_bot_settings.json")
 
 def load_credentials():
-    if not os.path.exists(CREDENTIALS_FILE):
-        return None
-    try:
-        with open(CREDENTIALS_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        print(f"Error loading credentials: {e}")
-        return None
+    """Load saved credentials from file"""
+    if os.path.exists(CREDENTIALS_FILE):
+        try:
+            with open(CREDENTIALS_FILE, 'r') as f:
+                creds = json.load(f)
+                # Decode stored password
+                if creds.get("password"):
+                    try:
+                        creds["password"] = base64.b64decode(creds["password"].encode()).decode()
+                    except:
+                        # If there's an error decoding, return empty to force re-login
+                        print(Fore.RED + "Error loading saved credentials, please login again." + Style.RESET_ALL)
+                        return {}
+                return creds
+        except Exception as e:
+            print(Fore.RED + f"Error loading credentials: {str(e)}" + Style.RESET_ALL)
+            # If there's any error loading, try to remove the corrupt file
+            try:
+                os.remove(CREDENTIALS_FILE)
+                print(Fore.YELLOW + "Corrupt credentials file removed. Please login again." + Style.RESET_ALL)
+            except:
+                pass
+            return {}
+    return {}
 
-def save_credentials(credentials):
+def save_credentials(username, password, save_login=False):
+    """Save credentials to file if user opts to"""
+    creds = {"username": username, "save_login": save_login}
+    if save_login:
+        # Basic encoding of password (not secure, but better than plaintext)
+        creds["password"] = base64.b64encode(password.encode()).decode()
+    
     try:
-        with open(CREDENTIALS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(credentials, f, indent=4)
+        # Make sure the directory exists
+        os.makedirs(os.path.dirname(CREDENTIALS_FILE), exist_ok=True)
+        
+        with open(CREDENTIALS_FILE, 'w') as f:
+            json.dump(creds, f)
         return True
     except Exception as e:
-        print(f"Error saving credentials: {e}")
+        print(Fore.RED + f"Error saving credentials: {str(e)}" + Style.RESET_ALL)
         return False
 
 def change_password(username, old_password, new_password):
@@ -140,7 +123,7 @@ def change_password(username, old_password, new_password):
         # If credentials are saved, update saved password
         creds = load_credentials()
         if creds.get("username") == username and creds.get("save_login"):
-            save_credentials(creds)
+            save_credentials(username, new_password, True)
         return True
     return False
 
@@ -204,7 +187,7 @@ def login():
                 # Ask to save credentials only for manual login
                 save_login = input(Fore.YELLOW + "Save login credentials for next time? (y/n): " + Style.RESET_ALL).strip().lower() == 'y'
                 if save_login:
-                    if save_credentials({"username": username, "password": password, "save_login": save_login}):
+                    if save_credentials(username, password, True):
                         print(Fore.GREEN + "Credentials saved successfully!" + Style.RESET_ALL)
                     else:
                         print(Fore.YELLOW + "Could not save credentials, but login successful." + Style.RESET_ALL)
@@ -969,26 +952,25 @@ def auto_send_signals():
         time.sleep(1)
         return
 
-def load_settings(settings_file):
-    if not os.path.exists(settings_file):
-        return None
+def load_settings():
+    """Load settings from file"""
     try:
-        with open(settings_file, 'r', encoding='utf-8') as f:
+        with open(DEFAULT_SETTINGS_FILE, 'r') as f:
             return json.load(f)
-    except Exception as e:
-        print(f"Error loading settings from {settings_file}: {e}")
-        return None
-
-def save_settings(settings, settings_file):
-    try:
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(settings_file), exist_ok=True)
-        with open(settings_file, 'w', encoding='utf-8') as f:
-            json.dump(settings, f, indent=4)
-        return True
-    except Exception as e:
-        print(f"Error saving settings to {settings_file}: {e}")
-        return False
+    except:
+        return {
+            "pairs": "NZDCAD_otc",  # Default pair
+            "start_time": "00:00",  # Default start time
+            "end_time": "23:49",    # Default end time
+            "days": "3",            # Default number of days
+            "mode": "normal",       # Default mode
+            "min_percentage": "100", # Default minimum percentage
+            "filter_value": "2",    # Default filter (2 = Future Trend)
+            "separate": "1",        # Default separate by trend
+            "timezone": "1",        # Default timezone (India)
+            "telegram_bot_token": "",  # Default bot token
+            "telegram_channel": ""  # Default channel ID
+        }
 
 def load_auto_bot_settings():
     """Load auto bot settings from file"""
@@ -1014,41 +996,80 @@ def load_auto_bot_settings():
     }
 
 def configure_auto_bot_settings():
-    """Configure auto bot settings"""
-    clear_screen()
-    print_header()
-    print(Fore.CYAN + "\nConfigure Auto Bot Settings\n" + Style.RESET_ALL)
+    """Configure settings for auto bot"""
+    clear_screen_except_banner()
+    display_banner()
     
-    # Load current settings
-    current_settings = load_settings(AUTO_BOT_SETTINGS_FILE) or {}
+    current_settings = load_auto_bot_settings()
     
-    # Configure settings
-    settings = {}
+    print(Fore.CYAN + "Enter your preferred auto bot settings:" + Style.RESET_ALL)
     
-    # Auto bot settings
-    print(Fore.YELLOW + "\nAuto Bot Settings" + Style.RESET_ALL)
-    settings['enabled'] = input(f"{Fore.WHITE}Enable auto bot (0/1) (current: {current_settings.get('enabled', '0')}): {Style.RESET_ALL}").strip() or current_settings.get('enabled', '0')
-    
-    if settings['enabled'] == '1':
-        settings['interval'] = input(f"{Fore.WHITE}Check interval in minutes (current: {current_settings.get('interval', '5')}): {Style.RESET_ALL}").strip() or current_settings.get('interval', '5')
-        settings['send_before'] = input(f"{Fore.WHITE}Send signals before expiry (minutes) (current: {current_settings.get('send_before', '2')}): {Style.RESET_ALL}").strip() or current_settings.get('send_before', '2')
+    # Update pairs
+    pairs = input(f"Enter pairs (current: {current_settings.get('pairs', '')}): ").strip()
+    if pairs:
+        current_settings['pairs'] = pairs
         
-        # Copy relevant settings from default settings
-        default_settings = load_settings(DEFAULT_SETTINGS_FILE) or get_default_settings()
-        for key in ['pairs', 'start_time', 'end_time', 'days', 'mode', 'min_percentage', 'filter_value', 'separate', 'timezone']:
-            settings[key] = default_settings.get(key, '')
+    # Update start time
+    start_time = input(f"Enter start time (current: {current_settings.get('start_time', '')}): ").strip()
+    if start_time:
+        current_settings['start_time'] = start_time
+
+    # Update end time
+    end_time = input(f"Enter end time (current: {current_settings.get('end_time', '')}): ").strip()
+    if end_time:
+        current_settings['end_time'] = end_time
         
-        # Telegram settings
-        print(Fore.YELLOW + "\nTelegram Settings" + Style.RESET_ALL)
-        settings['telegram_bot_token'] = input(f"{Fore.WHITE}Enter Telegram bot token (current: {'********' if current_settings.get('telegram_bot_token') else 'not set'}): {Style.RESET_ALL}").strip() or current_settings.get('telegram_bot_token', '')
-        settings['telegram_channel'] = input(f"{Fore.WHITE}Enter Telegram channel ID/username (current: {'********' if current_settings.get('telegram_channel') else 'not set'}): {Style.RESET_ALL}").strip() or current_settings.get('telegram_channel', '')
+    # Update days
+    days = input(f"Enter number of days (current: {current_settings.get('days', '')}): ").strip()
+    if days:
+        current_settings['days'] = days
+        
+    # Update mode
+    mode = input(f"Enter mode (Blackout/Normal) (current: {current_settings.get('mode', '')}): ").strip().lower()
+    if mode in ['blackout', 'normal']:
+        current_settings['mode'] = mode
+        
+    # Update minimum percentage
+    min_percentage = input(f"Enter minimum percentage (current: {current_settings.get('min_percentage', '')}): ").strip()
+    if min_percentage:
+        current_settings['min_percentage'] = min_percentage
+        
+    # Update filter value
+    filter_value = input(f"Enter filter value (1 Human or 2 Future Trend) (current: {current_settings.get('filter', '')}): ").strip()
+    if filter_value in ['1', '2']:
+        current_settings['filter'] = filter_value
+        
+    # Update separate trend
+    separate_trend = input(f"Separate results by trend? (1 for yes) (current: {current_settings.get('separate_trend', '')}): ").strip()
+    if separate_trend in ['0', '1']:
+        current_settings['separate_trend'] = separate_trend
+        
+    # Update send before time
+    send_before = input(f"Enter minutes before to send signal (current: {current_settings.get('send_before', '1')}): ").strip()
+    if send_before and send_before.isdigit():
+        current_settings['send_before'] = send_before
     
-    # Save settings
-    if save_settings(settings, AUTO_BOT_SETTINGS_FILE):
-        print(Fore.GREEN + "\nAuto bot settings saved successfully!" + Style.RESET_ALL)
-    else:
-        print(Fore.RED + "\nError saving auto bot settings!" + Style.RESET_ALL)
+    # Update timezone
+    print("\nSelect Timezone:")
+    for tz_id, tz_info in TIMEZONE_OPTIONS.items():
+        print(f"{tz_id}. {tz_info['name']} ({tz_info['display']})")
+    timezone = input(f"Enter timezone number (current: {current_settings.get('timezone', '')}): ").strip()
+    if timezone in TIMEZONE_OPTIONS:
+        current_settings['timezone'] = timezone
     
+    # Update Telegram Settings
+    print("\nTelegram Settings:")
+    bot_token = input(f"Enter Telegram Bot Token (current: {current_settings.get('bot_token', '')}): ").strip()
+    if bot_token:
+        current_settings['bot_token'] = bot_token
+        
+    channel_id = input(f"Enter Telegram Channel ID/Username (current: {current_settings.get('channel_id', '')}): ").strip()
+    if channel_id:
+        current_settings['channel_id'] = channel_id
+
+    # Save the updated settings
+    save_auto_bot_settings(current_settings)
+    print(Fore.GREEN + "\nAuto bot settings saved successfully!" + Style.RESET_ALL)
     hit_enter_to_continue()
 
 def save_auto_bot_settings(settings):
@@ -1063,14 +1084,15 @@ def save_auto_bot_settings(settings):
     # Update Default Settings with Telegram information
     if 'bot_token' in settings and 'channel_id' in settings:
         # Load current default settings
-        default_settings = load_settings(DEFAULT_SETTINGS_FILE)
+        default_settings = load_settings()
         
         # Update Telegram settings in default settings
         default_settings['telegram_bot_token'] = settings['bot_token']
         default_settings['telegram_channel'] = settings['channel_id']
         
         # Save updated default settings
-        save_settings(default_settings, DEFAULT_SETTINGS_FILE)
+        with open(DEFAULT_SETTINGS_FILE, 'w') as f:
+            json.dump(default_settings, f, indent=4)
         
         print(Fore.GREEN + "\nTelegram settings have been updated in both." + Style.RESET_ALL)
 
@@ -1137,7 +1159,8 @@ def save_default_settings():
         print(Fore.RED + "Invalid timezone selection. Please try again." + Style.RESET_ALL)
     
     # Save settings to file
-    save_settings(current_settings, DEFAULT_SETTINGS_FILE)
+    with open(DEFAULT_SETTINGS_FILE, 'w') as f:
+        json.dump(current_settings, f, indent=4)
     
     DEFAULT_SETTINGS = current_settings
     print(Fore.GREEN + "\n✅ Settings saved successfully!" + Style.RESET_ALL)
@@ -1145,37 +1168,97 @@ def save_default_settings():
 
 def reset_to_default():
     """Reset all settings to default values"""
-    clear_screen()
-    print_header()
-    print(Fore.CYAN + "\nReset to Default Settings\n" + Style.RESET_ALL)
+    clear_screen_except_banner()
+    display_banner()
     
-    # Get default settings
-    default_settings = get_default_settings()
+    print(Fore.YELLOW + "\n⚠️ Warning: This will reset ALL settings to default values!" + Style.RESET_ALL)
+    print(Fore.CYAN + "\nDefault values will be:" + Style.RESET_ALL)
+    print(Fore.YELLOW + """
+Trading Settings:
+• Pairs: NZDCAD_otc
+• Start Time: 00:00
+• End Time: 23:49
+• Days: 3
+• Mode: normal
+• Min Percentage: 100
+• Filter: 2 (Future Trend)
+• Separate Trend: 1
+• Timezone: 1 (India)
+
+Signal Message Settings:
+• Alert Title: UPCOMING SIGNAL ALERT
+• CALL Image URL: https://i.ibb.co/Q8L6mk5/Growth.png
+• PUT Image URL: https://i.ibb.co/1vsFM2N/Growth-1.png
+• Signal Rules: Default rules""" + Style.RESET_ALL)
     
-    # Show settings that will be reset
-    print(Fore.YELLOW + "The following settings will be reset to default values:" + Style.RESET_ALL)
-    for key, value in default_settings.items():
-        if key not in ['telegram_bot_token', 'telegram_channel']:
-            print(f"{Fore.WHITE}{key}: {Fore.CYAN}{value}{Style.RESET_ALL}")
-    
-    # Confirm reset
-    confirm = input(Fore.YELLOW + "\nAre you sure you want to reset all settings to default? (y/n): " + Style.RESET_ALL).strip().lower()
+    confirm = input(Fore.RED + "\nPress 'y' to confirm reset (This cannot be undone): " + Style.RESET_ALL).strip().lower()
     
     if confirm == 'y':
+        # Default settings
+        default_settings = {
+            "pairs": "NZDCAD_otc",
+            "start_time": "00:00",
+            "end_time": "23:49",
+            "days": "3",
+            "mode": "normal",
+            "min_percentage": "100",
+            "filter_value": "2",
+            "separate": "1",
+            "timezone": "1",
+            "telegram_bot_token": "",
+            "telegram_channel": ""
+        }
+        
+        # Default auto bot settings
+        default_auto_settings = {
+            "pairs": "NZDCAD_otc",
+            "start_time": "00:00",
+            "end_time": "23:49",
+            "days": "3",
+            "mode": "normal",
+            "min_percentage": "100",
+            "filter": "2",
+            "separate_trend": "1",
+            "timezone": "1",
+            "bot_token": "",
+            "channel_id": "",
+            "send_before": "1",
+            "alert_title": "UPCOMING SIGNAL ALERT",
+            "call_image_url": "https://i.ibb.co/Q8L6mk5/Growth.png",
+            "put_image_url": "https://i.ibb.co/1vsFM2N/Growth-1.png",
+            # Fixed settings that cannot be changed
+            "call_emoji": "🟢",
+            "put_emoji": "🔴",
+            "martingale_steps": "1 Step",
+            "bot_signature": "Generated by GrowUp Future Signals",
+            "signal_rules": ["If the previous candle is weak, the signal should be avoided", "Follow Trend"]
+        }
+        
+        # Update global DEFAULT_SETTINGS
+        global DEFAULT_SETTINGS
+        DEFAULT_SETTINGS = default_settings.copy()
+        
         # Save default settings
-        if save_settings(default_settings, DEFAULT_SETTINGS_FILE):
-            print(Fore.GREEN + "\nSettings have been reset to default values!" + Style.RESET_ALL)
+        with open(DEFAULT_SETTINGS_FILE, 'w') as f:
+            json.dump(default_settings, f, indent=4)
             
-            # Also reset auto bot settings
-            auto_bot_settings = {
-                'enabled': '0',
-                'interval': '5',
-                'send_before': '2'
-            }
-            save_settings(auto_bot_settings, AUTO_BOT_SETTINGS_FILE)
+        with open(AUTO_BOT_SETTINGS_FILE, 'w') as f:
+            json.dump(default_auto_settings, f, indent=4)
             
-        else:
-            print(Fore.RED + "\nError resetting settings to default values!" + Style.RESET_ALL)
+        print(Fore.GREEN + "\n✅ All settings have been reset to default values!" + Style.RESET_ALL)
+        
+        # Verify the reset
+        try:
+            # Reload settings to verify
+            loaded_settings = load_settings()
+            loaded_auto_settings = load_auto_bot_settings()
+            
+            if loaded_settings == default_settings and loaded_auto_settings == default_auto_settings:
+                print(Fore.GREEN + "✅ Settings reset verified successfully!" + Style.RESET_ALL)
+            else:
+                print(Fore.RED + "⚠️ Warning: Some settings may not have reset properly." + Style.RESET_ALL)
+        except Exception as e:
+            print(Fore.RED + f"⚠️ Error verifying settings reset: {str(e)}" + Style.RESET_ALL)
     else:
         print(Fore.YELLOW + "\nReset cancelled." + Style.RESET_ALL)
     
@@ -1184,340 +1267,202 @@ def reset_to_default():
 def get_device_mac():
     return "VERIFIED"  # Return a dummy value
 
+def hit_enter_to_continue():
+    """Prompt user to hit enter to go back to the menu."""
+    print(Fore.CYAN + "\nHIT ENTER TO GO BACK OR CONTINUE..." + Style.RESET_ALL)
+    try:
+        input()
+    except KeyboardInterrupt:
+        # Handle Ctrl+C gracefully
+        print(Fore.YELLOW + "\nOperation cancelled." + Style.RESET_ALL)
+        pass
+
+def clear_screen_except_banner():
+    """Clear the screen."""
+    try:
+        os.system('cls' if os.name == 'nt' else 'clear')
+    except:
+        # If the command fails, print newlines as fallback
+        print("\n" * 100)
+
 def customize_signal_message():
-    """Customize signal message format"""
-    clear_screen()
-    print_header()
-    print(Fore.CYAN + "\nCustomize Signal Message\n" + Style.RESET_ALL)
+    """Customize the signal message format and appearance"""
+    clear_screen_except_banner()
+    display_banner()
     
-    # Load current settings
-    settings = load_settings(DEFAULT_SETTINGS_FILE) or get_default_settings()
+    current_settings = load_auto_bot_settings()
     
-    # Signal message settings
-    print(Fore.YELLOW + "\nSignal Message Settings" + Style.RESET_ALL)
+    print(Fore.CYAN + "\nSignal Message Customization" + Style.RESET_ALL)
+    print(Fore.YELLOW + "═" * 50 + Style.RESET_ALL)
     
     # Alert title
-    settings['alert_title'] = input(f"{Fore.WHITE}Enter alert title (current: {settings.get('alert_title', 'GrowUp Future Signals')}): {Style.RESET_ALL}").strip() or settings.get('alert_title', 'GrowUp Future Signals')
+    alert_title = input(f"Enter alert title (current: {current_settings.get('alert_title', 'UPCOMING SIGNAL ALERT')}): ").strip()
+    if alert_title:
+        current_settings['alert_title'] = alert_title
+    elif 'alert_title' not in current_settings:
+        current_settings['alert_title'] = "UPCOMING SIGNAL ALERT"
     
-    # Signal images
-    print(Fore.YELLOW + "\nSignal Images" + Style.RESET_ALL)
-    settings['call_image_url'] = input(f"{Fore.WHITE}Enter CALL signal image URL (current: {settings.get('call_image_url', '')}): {Style.RESET_ALL}").strip() or settings.get('call_image_url', '')
-    settings['put_image_url'] = input(f"{Fore.WHITE}Enter PUT signal image URL (current: {settings.get('put_image_url', '')}): {Style.RESET_ALL}").strip() or settings.get('put_image_url', '')
+    print(Fore.YELLOW + "\n--- Signal Images ---" + Style.RESET_ALL)
+    # Call image URL
+    call_image_url = input(f"Enter CALL signal image URL (current: {current_settings.get('call_image_url', 'https://i.ibb.co/Q8L6mk5/Growth.png')}): ").strip()
+    if call_image_url:
+        current_settings['call_image_url'] = call_image_url
+    elif 'call_image_url' not in current_settings:
+        current_settings['call_image_url'] = "https://i.ibb.co/Q8L6mk5/Growth.png"
     
-    # Signal rules
-    print(Fore.YELLOW + "\nSignal Rules" + Style.RESET_ALL)
-    rules = []
+    # Put image URL
+    put_image_url = input(f"Enter PUT signal image URL (current: {current_settings.get('put_image_url', 'https://i.ibb.co/1vsFM2N/Growth-1.png')}): ").strip()
+    if put_image_url:
+        current_settings['put_image_url'] = put_image_url
+    elif 'put_image_url' not in current_settings:
+        current_settings['put_image_url'] = "https://i.ibb.co/1vsFM2N/Growth-1.png"
+    
+    # Fixed settings that cannot be changed
+    current_settings['call_emoji'] = "🟢"  # Fixed CALL emoji
+    current_settings['put_emoji'] = "🔴"   # Fixed PUT emoji
+    current_settings['martingale_steps'] = "1 Step"  # Fixed martingale steps
+    current_settings['bot_signature'] = "Generated by GrowUp Future Signals"  # Fixed signature
+    
+    print(Fore.YELLOW + "\n--- Signal Rules ---" + Style.RESET_ALL)
+    current_rules = current_settings.get('signal_rules', ["If the previous candle is weak, the signal should be avoided", "Follow Trend"])
+    
+    print("Current rules:")
+    for i, rule in enumerate(current_rules):
+        print(f"{i+1}. {rule}")
+    
+    new_rules = []
+    rule_num = 1
     while True:
-        rule = input(f"{Fore.WHITE}Enter signal rule (or press Enter to finish): {Style.RESET_ALL}").strip()
+        rule = input(f"Rule {rule_num} (leave empty to finish): ").strip()
         if not rule:
             break
-        rules.append(rule)
+        new_rules.append(rule)
+        rule_num += 1
     
-    if rules:
-        settings['signal_rules'] = rules
-    elif 'signal_rules' not in settings:
-        settings['signal_rules'] = [
-            "⚡️ Follow Money Management",
-            "⚡️ Trade at your own risk",
-            "⚡️ Don't over trade"
-        ]
-    
-    # Fixed settings
-    settings['call_emoji'] = "🟢"  # Fixed CALL emoji
-    settings['put_emoji'] = "🔴"   # Fixed PUT emoji
-    settings['martingale'] = "1 Step"  # Fixed martingale steps
-    settings['bot_signature'] = "Generated by GrowUp Future Signals"  # Fixed signature
-    
-    # Save settings
-    if save_settings(settings, DEFAULT_SETTINGS_FILE):
-        print(Fore.GREEN + "\nSignal message settings saved successfully!" + Style.RESET_ALL)
-    else:
-        print(Fore.RED + "\nError saving signal message settings!" + Style.RESET_ALL)
-    
-    hit_enter_to_continue()
+    if new_rules:
+        current_settings['signal_rules'] = new_rules
+    elif 'signal_rules' not in current_settings:
+        current_settings['signal_rules'] = ["If the previous candle is weak, the signal should be avoided", "Follow Trend"]
 
-def get_default_settings():
-    return {
-        "pairs": "NZDCAD_otc",  # Default pair
-        "start_time": "00:00",  # Default start time
-        "end_time": "23:49",    # Default end time
-        "days": "3",            # Default number of days
-        "mode": "normal",       # Default mode
-        "min_percentage": "100", # Default minimum percentage
-        "filter_value": "2",    # Default filter (2 = Future Trend)
-        "separate": "1",        # Default separate by trend
-        "timezone": "1",        # Default timezone (India)
-        "telegram_bot_token": "",  # Default bot token
-        "telegram_channel": ""  # Default channel ID
-    }
-
-def initialize_settings():
-    global DEFAULT_SETTINGS
-    settings = load_settings(DEFAULT_SETTINGS_FILE)
-    if settings is None:
-        settings = get_default_settings()
-        save_settings(settings, DEFAULT_SETTINGS_FILE)
-    DEFAULT_SETTINGS = settings
-    return settings
-
-def handle_login():
-    """Handle the login process"""
-    while True:
-        clear_screen()
-        print_header()
-        print(Fore.CYAN + "\nLogin")
-        print(Fore.YELLOW + "Enter your credentials or press Enter to go back to main menu.\n")
-        
-        username = input(Fore.WHITE + "Username: " + Style.RESET_ALL).strip()
-        if not username:
-            return
-            
-        password = input(Fore.WHITE + "Password: " + Style.RESET_ALL).strip()
-        if not password:
-            return
-            
-        try:
-            if verify_credentials(username, password):
-                save_login = input(Fore.YELLOW + "Save login credentials? (y/n): " + Style.RESET_ALL).strip().lower() == 'y'
-                if save_login:
-                    save_credentials({"username": username, "password": password, "save_login": True})
-                print(Fore.GREEN + "\nLogin successful!" + Style.RESET_ALL)
-                time.sleep(1)
-                return True
-            else:
-                print(Fore.RED + "\nInvalid credentials. Please try again." + Style.RESET_ALL)
-                time.sleep(2)
-        except Exception as e:
-            print(Fore.RED + f"\nLogin error: {str(e)}" + Style.RESET_ALL)
-            time.sleep(2)
-    return False
-
-def print_header():
-    """Print the application header"""
-    print(Fore.GREEN + """
- ██████╗ ██████╗  ██████╗ ██╗    ██╗██╗   ██╗██████╗ 
-██╔════╝ ██╔══██╗██╔═══██╗██║    ██║██║   ██║██╔══██╗
-██║  ███╗██████╔╝██║   ██║██║ █╗ ██║██║   ██║██████╔╝
-██║   ██║██╔══██╗██║   ██║██║███╗██║██║   ██║██╔═══╝ 
-╚██████╔╝██║  ██║╚██████╔╝╚███╔███╔╝╚██████╔╝██║     
- ╚═════╝ ╚═╝  ╚═╝ ╚═════╝  ╚══╝╚══╝  ╚═════╝ ╚═╝     
-                                                       
-███████╗██╗   ██╗████████╗██╗   ██╗██████╗ ███████╗   
-██╔════╝██║   ██║╚══██╔══╝██║   ██║██╔══██╗██╔════╝   
-█████╗  ██║   ██║   ██║   ██║   ██║██████╔╝█████╗     
-██╔══╝  ██║   ██║   ██║   ██║   ██║██╔══██╗██╔══╝     
-██║     ╚██████╔╝   ██║   ╚██████╔╝██║  ██║███████╗   
-╚═╝      ╚═════╝    ╚═╝    ╚═════╝ ╚═╝  ╚═╝╚══════╝   
-                                                       
-███████╗██╗ ██████╗ ███╗   ██╗ █████╗ ██╗     ███████╗
-██╔════╝██║██╔════╝ ████╗  ██║██╔══██╗██║     ██╔════╝
-███████╗██║██║  ███╗██╔██╗ ██║███████║██║     ███████╗
-╚════██║██║██║   ██║██║╚██╗██║██╔══██║██║     ╚════██║
-███████║██║╚██████╔╝██║ ╚████║██║  ██║███████╗███████║
-╚══════╝╚═╝ ╚═════╝ ╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝╚══════╝
-""" + Style.RESET_ALL)
-    print(Fore.CYAN + "Version 2.0 - Mobile Edition" + Style.RESET_ALL)
-    print(Fore.YELLOW + "Copyright © 2024 GrowUp Future Signals. All rights reserved.\n" + Style.RESET_ALL)
-
-def clear_screen():
-    """Clear the terminal screen"""
-    if IS_TERMUX:
-        os.system('clear')
-    else:
-    os.system('cls' if os.name == 'nt' else 'clear')
-
-def verify_credentials(username, password):
-    """Verify user credentials"""
-    try:
-        # Create a session
-        session = requests.Session()
-        
-        # Set headers to mimic a browser
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-        }
-        session.headers.update(headers)
-        
-        # Login data
-        login_data = {
-            'username': username,
-            'password': password
-        }
-        
-        # Send login request
-        response = session.post('https://api.growupfuturesignals.com/login', json=login_data)
-        
-        if response.status_code == 200:
-            data = response.json()
-            if data.get('success'):
-                return True
-        
-        return False
-        
-    except requests.exceptions.RequestException as e:
-        print(Fore.RED + f"\nConnection error: {str(e)}" + Style.RESET_ALL)
-        return False
-    except Exception as e:
-        print(Fore.RED + f"\nVerification error: {str(e)}" + Style.RESET_ALL)
-        return False
-
-def view_current_settings():
-    """Display current settings"""
-    clear_screen()
-    print_header()
-    print(Fore.CYAN + "\nCurrent Settings:\n" + Style.RESET_ALL)
-    
-    # Load settings
-    default_settings = load_settings(DEFAULT_SETTINGS_FILE)
-    auto_bot_settings = load_settings(AUTO_BOT_SETTINGS_FILE)
-    
-    if default_settings:
-        print(Fore.YELLOW + "Default Settings:" + Style.RESET_ALL)
-        for key, value in default_settings.items():
-            print(f"{Fore.WHITE}{key}: {Fore.CYAN}{value}{Style.RESET_ALL}")
-    else:
-        print(Fore.RED + "No default settings found." + Style.RESET_ALL)
-    
-    print()
-    
-    if auto_bot_settings:
-        print(Fore.YELLOW + "Auto Bot Settings:" + Style.RESET_ALL)
-        for key, value in auto_bot_settings.items():
-            if key in ['telegram_bot_token', 'telegram_channel']:
-                value = '********' if value else ''
-            print(f"{Fore.WHITE}{key}: {Fore.CYAN}{value}{Style.RESET_ALL}")
-    else:
-        print(Fore.RED + "No auto bot settings found." + Style.RESET_ALL)
-    
-    hit_enter_to_continue()
-
-def configure_default_settings():
-    """Configure default settings"""
-    clear_screen()
-    print_header()
-    print(Fore.CYAN + "\nConfigure Default Settings\n" + Style.RESET_ALL)
-    
-    # Load current settings
-    current_settings = load_settings(DEFAULT_SETTINGS_FILE) or get_default_settings()
-    
-    # Configure settings
-    settings = {}
-    
-    # Trading pairs
-    print(Fore.YELLOW + "\nTrading Pairs" + Style.RESET_ALL)
-    settings['pairs'] = input(f"{Fore.WHITE}Enter pairs (current: {current_settings['pairs']}): {Style.RESET_ALL}").strip() or current_settings['pairs']
-    
-    # Time settings
-    print(Fore.YELLOW + "\nTime Settings" + Style.RESET_ALL)
-    settings['start_time'] = input(f"{Fore.WHITE}Enter start time HH:MM (current: {current_settings['start_time']}): {Style.RESET_ALL}").strip() or current_settings['start_time']
-    settings['end_time'] = input(f"{Fore.WHITE}Enter end time HH:MM (current: {current_settings['end_time']}): {Style.RESET_ALL}").strip() or current_settings['end_time']
-    
-    # Trading settings
-    print(Fore.YELLOW + "\nTrading Settings" + Style.RESET_ALL)
-    settings['days'] = input(f"{Fore.WHITE}Enter number of days (current: {current_settings['days']}): {Style.RESET_ALL}").strip() or current_settings['days']
-    settings['mode'] = input(f"{Fore.WHITE}Enter mode (normal/blackout) (current: {current_settings['mode']}): {Style.RESET_ALL}").strip().lower() or current_settings['mode']
-    settings['min_percentage'] = input(f"{Fore.WHITE}Enter minimum percentage (current: {current_settings['min_percentage']}): {Style.RESET_ALL}").strip() or current_settings['min_percentage']
-    settings['filter_value'] = input(f"{Fore.WHITE}Enter filter value (1=Human/2=Future Trend) (current: {current_settings['filter_value']}): {Style.RESET_ALL}").strip() or current_settings['filter_value']
-    settings['separate'] = input(f"{Fore.WHITE}Enter separate trend (0/1) (current: {current_settings['separate']}): {Style.RESET_ALL}").strip() or current_settings['separate']
-    
-    # Timezone setting
-    print(Fore.YELLOW + "\nTimezone Setting" + Style.RESET_ALL)
-    settings['timezone'] = input(f"{Fore.WHITE}Enter timezone (1-24) (current: {current_settings['timezone']}): {Style.RESET_ALL}").strip() or current_settings['timezone']
-    
-    # Telegram settings
-    print(Fore.YELLOW + "\nTelegram Settings" + Style.RESET_ALL)
-    settings['telegram_bot_token'] = input(f"{Fore.WHITE}Enter Telegram bot token (current: {'********' if current_settings['telegram_bot_token'] else 'not set'}): {Style.RESET_ALL}").strip() or current_settings['telegram_bot_token']
-    settings['telegram_channel'] = input(f"{Fore.WHITE}Enter Telegram channel ID/username (current: {'********' if current_settings['telegram_channel'] else 'not set'}): {Style.RESET_ALL}").strip() or current_settings['telegram_channel']
-    
-    # Save settings
-    if save_settings(settings, DEFAULT_SETTINGS_FILE):
-        print(Fore.GREEN + "\nSettings saved successfully!" + Style.RESET_ALL)
-    else:
-        print(Fore.RED + "\nError saving settings!" + Style.RESET_ALL)
-    
+    # Save the updated settings
+    save_auto_bot_settings(current_settings)
+    print(Fore.GREEN + "\n✅ Signal message customization saved successfully!" + Style.RESET_ALL)
     hit_enter_to_continue()
 
 def main():
     """Main function with all features"""
+    # Initialize important directories at startup
     try:
-        # Initialize settings
-        initialize_settings()
+        # Create signals directory if it doesn't exist
+        signals_dir = os.path.join(APP_PATH, "Signals")
+        os.makedirs(signals_dir, exist_ok=True)
         
-        while True:
-            clear_screen()
-            print_header()
-            
-            print(Fore.CYAN + "\nMain Menu:")
-            print(Fore.WHITE + "1. Login")
-            print("2. Configure Default Settings")
-            print("3. Configure Auto Bot Settings")
-            print("4. Start Auto Bot")
-            print("5. View Current Settings")
-            print("6. Customize Signal Message")
-            print("7. Reset to Default Settings")
-            print("8. Logout")
-            
-            choice = input(Fore.YELLOW + "\nEnter your choice (1-8): " + Style.RESET_ALL).strip()
-            
-            if choice == "1":
-                handle_login()
-            elif choice == "2":
-                configure_default_settings()
-            elif choice == "3":
-                configure_auto_bot_settings()
-            elif choice == "4":
-                start_auto_bot()
-            elif choice == "5":
-                view_current_settings()
-            elif choice == "6":
-                customize_signal_message()
-            elif choice == "7":
-                reset_to_default()
-            elif choice == "8":
-                clear_screen()
-                print(Fore.GREEN + "Thank you for using GrowUp Future Signals!" + Style.RESET_ALL)
-                break
-            else:
-                print(Fore.RED + "\nInvalid choice! Please try again." + Style.RESET_ALL)
-                hit_enter_to_continue()
-                
-    except KeyboardInterrupt:
-        print(Fore.YELLOW + "\n\nExiting gracefully..." + Style.RESET_ALL)
+        # Ensure data directory exists and is writable
+        os.makedirs(DATA_DIR, exist_ok=True)
     except Exception as e:
-        print(Fore.RED + f"\nAn error occurred: {str(e)}" + Style.RESET_ALL)
-        hit_enter_to_continue()
+        print(Fore.RED + f"Error initializing directories: {str(e)}" + Style.RESET_ALL)
+        print(Fore.YELLOW + "Some features may not work correctly." + Style.RESET_ALL)
+        time.sleep(3)
+    
+    while True:
+        try:
+            clear_screen_except_banner()
+            display_banner()
+            
+            # Load saved settings at startup
+            global DEFAULT_SETTINGS
+            DEFAULT_SETTINGS = load_settings()
 
-def start_auto_bot():
-    """Start the auto bot for signal generation"""
-    clear_screen()
-    print_header()
-    print(Fore.CYAN + "\nStarting Auto Bot\n" + Style.RESET_ALL)
-    
-    # Load auto bot settings
-    settings = load_settings(AUTO_BOT_SETTINGS_FILE)
-    if not settings:
-        print(Fore.RED + "Error: Auto bot settings not found." + Style.RESET_ALL)
-        hit_enter_to_continue()
-        return
-    
-    if settings.get('enabled') != '1':
-        print(Fore.RED + "Error: Auto bot is not enabled." + Style.RESET_ALL)
-        hit_enter_to_continue()
-        return
-    
-    print(Fore.GREEN + "Auto bot started!" + Style.RESET_ALL)
-    print(Fore.YELLOW + "\nPress Ctrl+C to stop." + Style.RESET_ALL)
-    
-    try:
-        while True:
-            time.sleep(int(settings.get('interval', 5)) * 60)
-    except KeyboardInterrupt:
-        print(Fore.YELLOW + "\nStopping auto bot..." + Style.RESET_ALL)
-    except Exception as e:
-        print(Fore.RED + f"\nError: {str(e)}" + Style.RESET_ALL)
-    
-    hit_enter_to_continue()
+            print(Fore.CYAN + "\nMain Menu:")
+            print(Fore.YELLOW + "1. Login")
+            print(Fore.YELLOW + "2. Software Info")
+            print(Fore.YELLOW + "3. Exit")
+            
+            try:
+                choice = input(Fore.YELLOW + "\nEnter your choice (1-3): " + Style.RESET_ALL).strip()
+            except KeyboardInterrupt:
+                choice = "3"  # Default to exit
+                
+            if choice == "1":
+                login_info = login()
+                if login_info:
+                    username, expire_time = login_info  # Unpack the returned tuple
+                    
+                    while True:
+                        if not check_session(username):
+                            break
+                        
+                        try:
+                            clear_screen_except_banner()
+                            display_banner()
+                            
+                            print(Fore.CYAN + f"\nWelcome, {username}! Your license is valid until: {expire_time}\n")
+                            print(Fore.CYAN + "\nSignal Menu:")
+                            print(Fore.YELLOW + "1. Fetch Signals")
+                            print(Fore.YELLOW + "2. Default Settings")
+                            print(Fore.YELLOW + "3. Show Available Pairs")
+                            print(Fore.YELLOW + "4. Auto Send Signals")
+                            print(Fore.YELLOW + "5. Configure Auto Bot Settings")
+                            print(Fore.YELLOW + "6. Customize Signal Message")
+                            print(Fore.YELLOW + "7. Reset All Settings to Default")
+                            print(Fore.YELLOW + "8. Logout")
+                            
+                            sub_choice = input(Fore.YELLOW + "\nEnter your choice (1-8): " + Style.RESET_ALL).strip()
+                            
+                            if sub_choice == "1":
+                                fetch_signals()
+                                hit_enter_to_continue()
+                            elif sub_choice == "2":
+                                save_default_settings()
+                                hit_enter_to_continue()
+                            elif sub_choice == "3":
+                                display_pairs()
+                                hit_enter_to_continue()
+                            elif sub_choice == "4":
+                                auto_send_signals()
+                            elif sub_choice == "5":
+                                configure_auto_bot_settings()
+                                hit_enter_to_continue()
+                            elif sub_choice == "6":
+                                customize_signal_message()
+                            elif sub_choice == "7":
+                                reset_to_default()
+                            elif sub_choice == "8":
+                                print(Fore.RED + "Logging out..." + Style.RESET_ALL)
+                                time.sleep(2)
+                                break
+                        except Exception as e:
+                            print(Fore.RED + f"Error in signal menu: {str(e)}" + Style.RESET_ALL)
+                            hit_enter_to_continue()
+                            
+            elif choice == "2":
+                display_pairs()
+                hit_enter_to_continue()
+            elif choice == "3":
+                clear_screen_except_banner()
+                display_banner()
+                show_copyright()
+                print(Fore.RED + "\nExiting program..." + Style.RESET_ALL)
+                time.sleep(2)
+                sys.exit()
+            else:
+                print(Fore.RED + "Invalid choice. Please try again." + Style.RESET_ALL)
+                hit_enter_to_continue()
+        except Exception as e:
+            print(Fore.RED + f"An unexpected error occurred: {str(e)}" + Style.RESET_ALL)
+            hit_enter_to_continue()
 
 
 if __name__ == "__main__":
+    DEFAULT_SETTINGS = {
+        "pairs": "BRLUSD_otc,USDPKR_otc",
+        "start_time": "09:00",
+        "end_time": "18:00",
+        "days": "3",
+        "mode": "blackout",
+        "min_percentage": "80",
+        "filter_value": "1",
+        "separate": "1",
+        "timezone": "1"  # Default to India timezone
+    }
     main()
